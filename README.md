@@ -426,13 +426,23 @@ ticket-manager/
         └── types/               # shared TypeScript types
 ```
 
-## Technical decisions and trade-offs
+## Assumptions, Trade-offs, and the Road to Production
 
-### "Plain" React, with no framework or helper libraries
+The brief asks for the assumptions made, what would be improved with more time, and code that reflects how production software gets written. This section covers all three — organized as: what was assumed where the brief was silent, the deliberate trade-offs behind the current code, and then a roadmap split by layer (frontend, backend, infrastructure) based on what's actually in this repository today.
 
-The brief asked for "the frontend to be built with React" — without mentioning the possibility of frameworks (Next.js, Remix) or helper libraries for routing, remote state, or forms. We interpreted this literally, and went further: the project actually started with a few common ecosystem libraries, and they were deliberately removed — leaving only `react` and `react-dom` as runtime dependencies. The idea is to keep all the logic (navigation between screens, API calls, form validation) visible in the code itself, with no abstraction hiding what's happening underneath — fitting for a technical evaluation. A larger project would benefit from the libraries below.
+### Assumptions
 
-#### Libraries considered and removed
+Places where the brief didn't specify behavior, and a decision had to be made:
+
+| Assumption | Reasoning |
+|---|---|
+| **Employees see only their own tickets** | The brief says "the support team can view all tickets" but doesn't say what an employee sees. `GET /api/tickets` filters by `created_by_id` when the role is `employee` (`app/services/ticket_service.py`). |
+| **Status only moves forward, one step at a time, with no reopening** | `OPEN → IN_PROGRESS → RESOLVED → CLOSED` — no skipping a step, no path back from `CLOSED`. Enforced both in the UI (only the single valid next status is ever offered) and in the backend (`ALLOWED_TRANSITIONS` in `ticket_service.py`). |
+| **No self-service user registration** | The two existing users come from a seed script (`app/db/seed.py`), not a signup form — the brief didn't ask for account creation, so it was treated as out of scope rather than guessed at. |
+
+### Trade-offs (deliberate, not oversights)
+
+**"Plain" React, with no framework or helper libraries.** The brief asked for "the frontend to be built with React," without mentioning frameworks (Next.js, Remix) or helper libraries for routing, remote state, or forms. This was interpreted literally, and taken further: the project actually started with a few common ecosystem libraries, and they were deliberately removed — leaving only `react` and `react-dom` as runtime dependencies, so every piece of logic (navigation, API calls, form validation) stays visible in the code itself, with nothing hidden behind an abstraction. Fitting for a technical evaluation; a real production frontend would very likely want these back:
 
 | Library | What it would solve, if the project grew |
 |---|---|
@@ -442,51 +452,48 @@ The brief asked for "the frontend to be built with React" — without mentioning
 | `zod` | Declarative schema validation, shareable between the form and the TypeScript type |
 | `@hookform/resolvers` | Bridge between `react-hook-form` and `zod` |
 
-These are the first candidates to add more dynamism to the screen flow if the project ever needed to grow for real — they weren't used here by choice of simplicity, not lack of familiarity.
+**JWT in `localStorage`, not an httpOnly cookie.** An `httpOnly` cookie would prevent the token from being exposed to an XSS attack, but would require handling CSRF and `same-site` configuration between the frontend (`:5173`) and the backend (`:8000`) — disproportionate for this project's scope.
 
-### JWT in `localStorage`, not an httpOnly cookie
+**Email notification is best-effort, not transactional.** Sending the status-change email must never break the API response — the status change is already committed to the database before the send is even attempted. If the mail server is unreachable (or anything else goes wrong while sending), it's only logged server-side; the caller still gets a normal success response (`app/services/notification_service.py`).
 
-An `httpOnly` cookie would prevent the token from being exposed to an XSS attack, but would require handling CSRF and `same-site` configuration between the frontend (`:5173`) and the backend (`:8000`) — disproportionate for this project's scope. A conscious trade-off, not an oversight.
+### What I'd improve with more time
 
-### Role-based scope on the listing (assumption)
+Going through everything actually built — frontend, backend, and infrastructure — here's what's real about each, not a generic checklist:
 
-The brief says "the support team can view all tickets" — it doesn't explicitly say what an employee sees. We decided, as an assumption, that an employee sees only their own tickets (`GET /api/tickets` filters by `created_by_id` when the role is `employee`).
+#### Frontend
 
-### Strictly sequential status transition (assumption)
+| Area | What's there today | What I'd add |
+|---|---|---|
+| Routing / data fetching / forms | Hand-rolled (`useState`-based view switching, manual `fetch` hooks, manual validation) — see the trade-off above | `react-router-dom`, `@tanstack/react-query`, `react-hook-form` + `zod`, as detailed in the table above |
+| Bundle | `npm run build` produces a single JS chunk (~242 KB, ~74 KB gzipped) and a single CSS file — no code splitting | Route-based `React.lazy()` splitting once there are enough screens for it to matter |
+| Testing | Vitest + Testing Library — 53 component/unit tests, no browser automation | An end-to-end suite (Playwright) covering the real login → create → advance-status → email flow across actual browser sessions |
+| Language | UI text is hardcoded in English, with no translation layer | Extract strings into a small i18n layer if the product ever needed more than one language |
 
-`OPEN → IN_PROGRESS → RESOLVED → CLOSED`, with no skipping a step and **no reopening path** from `CLOSED`. The interface never offers a free-form list of statuses to pick from — always only the single valid next step, enforcing the rule both in the UI and in the backend (`ALLOWED_TRANSITIONS` in `app/services/ticket_service.py`).
+#### Backend
 
-### Email notification is best-effort
+| Area | What's there today | What I'd add |
+|---|---|---|
+| Security | JWT + bcrypt, generic 401 on wrong credentials (timing-safe), input length limits — no dependency scanning, no HTTP security headers, no rate limiting at the application level (only at the infrastructure edge, see below) | Dependabot/`pip-audit`/`npm audit` in CI; SBOM + provenance attestation (SLSA) on image builds; CSP/HSTS headers; a formal pass against the OWASP API Security Top 10; and a startup check that refuses to boot if `JWT_SECRET_KEY` is still the default placeholder |
+| Code quality gates | `pytest` runs in CI (`ci.yml`) — there's no linter or type-checker (`ruff`, `mypy`) wired in for the backend, and the frontend's own `oxlint` script exists but isn't called from `ci.yml` either | Add both to `ci.yml` as required checks, not just tests |
+| Request handling | Status-change emails are sent synchronously inside the `PATCH .../status` request — the HTTP response waits for the SMTP call (up to its 5s timeout) to finish before returning | Move the send to a FastAPI `BackgroundTask` (or a proper queue, see Notifications below) so the response returns as soon as the status change is committed |
+| Scalability | `create_engine(settings.DATABASE_URL)` uses SQLAlchemy's default pool, single database connection, no cache | Explicit connection pool sizing; Redis for the most common filtered listings; start routing read-only queries to the read replica that already exists in `infra/terraform/database.tf` (see Infrastructure below — it's provisioned but the application doesn't use it yet) |
+| Observability | Plain `logging` calls (e.g. in `notification_service.py`); `/health` only confirms the process is up | OpenTelemetry for logs/metrics/traces under one standard; expand `/health` to check the database connection too; SLO/burn-rate alerting instead of a flat threshold |
+| User registration | Deliberately absent (see Assumptions above) | If it became a real need: first a same-backend `POST /api/auth/register` (no restructuring needed — creating a user is a simple CRUD operation on the existing `User` model, so this **doesn't** justify splitting into microservices); if requirements grew further (multiple systems sharing login, stricter compliance), move to a managed identity provider (Auth0, AWS Cognito, Firebase Auth) rather than building one |
+| Notifications | Synchronous email only, sent inline in the request (see above) | Evolve into an event-driven model (message queue) once there's a real reason to — it would also open the door to browser push (Web Push API, no Firebase needed) and receiving webhooks from external systems, without redesigning what already exists |
 
-Sending the status-change notification email must never break the API response — the status change was already saved to the database before the send is even attempted. If the email server is down (or any other error occurs while sending), it's only logged server-side; the API caller still gets a normal success response (`app/services/notification_service.py`).
+#### Infrastructure
 
-### No registering new users — and why that doesn't call for microservices
+`infra/terraform/` and `.github/workflows/` are a **real technical draft**, not just prose — they're validated (`terraform validate`/`terraform fmt`, `actionlint`) but never applied against a live cloud account (there are no credentials here). `docker compose up` remains everything needed to run the project today; none of this connects to the local setup until someone deliberately uses it.
 
-Today the system doesn't create new users through the interface — the two existing users are inserted by a seed script (`app/db/seed.py`), not through a signup form. This is a deliberate scope choice: the brief didn't ask for that feature.
+| Area | What's there today | What I'd add / reconsider |
+|---|---|---|
+| Compute | **Cloud Run**, not Kubernetes (`cloud_run.tf`) — deliberate: for a single API with no other services to orchestrate, Cloud Run gets the same automatic scaling with far less operational surface | If the system ever grew into several independent services that need to be orchestrated together, that's the point where Kubernetes would start to earn its complexity — not before |
+| Global reach | One Cloud Run service in a single region (`var.region`), behind a Global HTTPS Load Balancer (`load_balancer.tf`) | The Load Balancer's global anycast routing is only half-used this way — the frontend bucket does benefit (Cloud CDN caches it at the edge everywhere), but API requests still travel to the one region Cloud Run runs in. A genuinely global API would need Cloud Run deployed in multiple regions behind that same Load Balancer |
+| Why there's a Load Balancer at all, given Cloud Run already balances its own instances | Cloud Run automatically distributes traffic across its own container instances (`0`–`max_instance_count`) — that part needs nothing extra | The Load Balancer exists for what Cloud Run alone doesn't do: **(1)** one hostname for both the API (Cloud Run) and the static frontend (Cloud Storage bucket), routed by path via `url_map`; **(2)** Cloud Armor (WAF + the 100 req/min rate limit) only attaches to a Load Balancer backend, not directly to Cloud Run; **(3)** Cloud CDN only caches a `backend_bucket`, unrelated to Cloud Run |
+| Database | Cloud SQL Postgres with a **read replica** already provisioned (`database.tf`) | The replica is provisioned but currently unused — the application has a single `DATABASE_URL` pointing at the primary. Wiring read-only endpoints (`GET /api/tickets`, `GET /api/tickets/{id}`) to the replica is the natural next step once read traffic is the bottleneck |
+| CI/CD | `ci.yml` runs tests only (no lint/type-check, see Backend above); `deploy.yml` uses Workload Identity Federation (no long-lived service account key) to build and deploy to Cloud Run on merge to `main` | Trunk-based development with feature flags and canary/progressive delivery instead of an all-at-once deploy; DORA metrics to track the health of the delivery process itself |
 
-If this became a real need in the future, the natural path **would not be** splitting the backend into microservices — for a domain this size, that would add operational complexity (a simple foreign key would turn into a network call; one more service to deploy and monitor) with no real benefit, since creating a user is fundamentally a simple CRUD operation on the `User` model that already exists. The more likely evolution would be:
-
-1. **First step**: a registration endpoint on the same backend (`POST /api/auth/register`), with no restructuring at all.
-2. **If the requirement genuinely grew** (multiple systems sharing login, tougher security/compliance requirements): the most common choice in the market isn't usually to build your own authentication service from scratch, but to use a **managed identity provider** (Auth0, AWS Cognito, Firebase Auth) — taking the responsibility for protecting the most sensitive part of the entire application off whoever maintains the system.
-
-## What I'd improve with more time
-
-| Area | What I'd add |
-|---|---|
-| **Security** | Automated dependency scanning (Dependabot/`pip-audit`/`npm audit`); SBOM + provenance attestation (SLSA) on image builds; HTTP security headers (CSP, HSTS); a formal review against the OWASP API Security Top 10 |
-| **Scalability** | Cache (Redis) for the most common filtered listings; explicit connection pooling in SQLAlchemy; a database read replica to separate reads from writes |
-| **Observability** | OpenTelemetry (logs, metrics, and traces under a single standard); an expanded `/health` that checks the database dependency, not just the process; SLO/burn-rate based alerting instead of a simple threshold |
-| **User registration** | See the "No registering new users" section above |
-| **Notifications** | Evolve today's synchronous email into an event-driven model (message queue), allowing browser push (Web Push API, no Firebase needed) and receiving webhooks from external systems to be plugged in, without redesigning anything that already exists |
-
-### Production infrastructure files (`infra/`, `.github/workflows/`)
-
-This repository already includes a **real technical draft** of how this system would run in production in the cloud, prepared for a large volume of concurrent access (Google Cloud, via Terraform) and CI/CD pipelines. **This is material for future development/evolution — it is not required to run the project today.** `docker compose up` remains everything that's needed; these files sit idle, with no connection to the local app, until someone decides to use them on purpose.
-
-- **`.github/workflows/ci.yml`** — already real and functional: runs the backend and frontend tests on every push/PR. Validated with `actionlint`.
-- **`.github/workflows/deploy.yml`** and **`infra/terraform/*.tf`** — validated for syntax only (`terraform validate`/`terraform fmt`), never applied against a real cloud account (there are no credentials here). They use **Cloud Run** instead of Kubernetes — a deliberate decision: for a single API, with no multiple services interacting with each other, Cloud Run solves the same scaling problem with far less operational complexity.
-
-To actually use this, someone with a Google Cloud account would:
+To actually apply the Terraform, someone with a Google Cloud account would:
 1. Copy `infra/terraform/terraform.tfvars.example` to `terraform.tfvars` and fill it in with real values for their own project (this file must never be committed — it's already in `.gitignore`).
 2. Pass the two secrets (`jwt_secret`, `db_password`) via environment variable, never writing them into a file:
    ```bash
