@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+
+# Node
+node_modules/
+dist/
+.vite/
+
+# Env
+.env
+.env.local
+
+# OS
+.DS_Store
+
+# Editors
+.vscode/
+.idea/
+
+# Documento de avaliação do desafio (não faz parte da submissão)
+*.docx
+
+# Terraform — .tfstate guarda os valores reais dos recursos (inclusive
+# segredos em texto puro) e .tfvars teria as credenciais reais preenchidas
+infra/terraform/.terraform/
+infra/terraform/*.tfstate
+infra/terraform/*.tfstate.*
+infra/terraform/*.tfvars
+!infra/terraform/*.tfvars.example

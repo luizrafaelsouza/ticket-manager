@@ -1,0 +1,18 @@
+LEMBRAR MAIS TARDE — TÓPICOS PARA REVISITAR
+
+1. Concorrência
+Como a API garante que dois usuários acessando/alterando os mesmos dados ao
+mesmo tempo não sobrescrevem informação um do outro (requisições sem estado
+compartilhado + transações do banco de dados / MVCC do Postgres).
+
+2. Sobrecarga do servidor em escala
+O que seria necessário para o sistema aguentar milhões de usuários: múltiplas
+instâncias da API atrás de um load balancer, pool de conexões com o banco,
+rate limiting, cache (ex: Redis). O setup atual não foi pensado para essa
+escala — foi pensado para o escopo deste desafio.
+
+3. Permissões
+Como garantir que o usuário acessando tem autorização: identificação via
+get_current_user (quem é você) + autorização por papel via require_role
+(o que você pode fazer) + escopo de dados nas próprias consultas ao banco
+(o que você pode ver).

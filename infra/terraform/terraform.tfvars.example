@@ -1,0 +1,12 @@
+# Copie este arquivo para "terraform.tfvars" e preencha com valores reais.
+# terraform.tfvars nunca deve ser commitado (já está no .gitignore).
+
+project_id        = "seu-projeto-gcp"
+region             = "southamerica-east1"
+environment        = "production"
+api_image          = "southamerica-east1-docker.pkg.dev/seu-projeto-gcp/ticket-manager/api:latest"
+github_repository  = "seu-usuario/ticket-manager"
+
+# jwt_secret e db_password são segredos — não preencher aqui.
+# Passe na hora do apply, por exemplo:
+#   TF_VAR_jwt_secret="..." TF_VAR_db_password="..." terraform apply

@@ -1,0 +1,46 @@
+name: Deploy
+
+# Só roda na branch principal — nunca em PR, evitando publicar algo que
+# ainda não foi revisado. Depende dos outputs do Terraform em infra/terraform
+# (workload_identity_provider e deployer_service_account) já estarem
+# configurados como secrets neste repositório.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  id-token: write # necessário pra autenticação via Workload Identity Federation
+  contents: read
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Autenticar no GCP (sem chave estática de service account)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: ${{ secrets.GCP_DEPLOYER_SERVICE_ACCOUNT }}
+
+      - uses: google-github-actions/setup-gcloud@v2
+
+      - name: Configurar Docker pro Artifact Registry
+        run: gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev
+
+      - name: Build e push da imagem da API
+        working-directory: ticket-manager-back
+        run: |
+          IMAGE="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT_ID }}/ticket-manager/api:${{ github.sha }}"
+          docker build -t "$IMAGE" .
+          docker push "$IMAGE"
+          echo "IMAGE=$IMAGE" >> "$GITHUB_ENV"
+
+      - name: Deploy no Cloud Run
+        run: |
+          gcloud run deploy ticket-manager-api-production \
+            --image "$IMAGE" \
+            --region "${{ secrets.GCP_REGION }}" \
+            --project "${{ secrets.GCP_PROJECT_ID }}"

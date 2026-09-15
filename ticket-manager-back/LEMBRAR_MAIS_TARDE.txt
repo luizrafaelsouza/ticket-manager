@@ -1,0 +1,29 @@
+1. "Sem sobrescrever as informações" — concorrência (evitar dois usuários bagunçando o mesmo dado)
+Duas coisas garantem isso, uma que já temos, outra que é do próprio banco de dados:
+
+a) Cada requisição é independente ("stateless") — o servidor não guarda "quem está usando agora" em memória. Cada requisição já chega com tudo que precisa (o header X-Dev-User-Id hoje, o token JWT depois). Isso significa que mil pessoas mandando requisições ao mesmo tempo não "brigam" pra usar o mesmo espaço de memória — cada requisição é tratada de forma isolada, do início ao fim.
+
+b) Transações no banco de dados — quando duas pessoas tentam mexer na mesma linha da tabela ao mesmo tempo (ex: dois atendentes tentando mudar o status do mesmo ticket), quem evita a bagunça é o Postgres, não nosso código. Já usamos isso: em ticket_service.create_ticket, o db.commit() só acontece depois de TODAS as mudanças (ticket + histórico) — se algo falhar no meio, nada é salvo (tudo ou nada). O Postgres, por baixo dos panos, usa um mecanismo chamado MVCC (controle de concorrência por múltiplas versões) — se duas transações tentam mudar a mesma linha ao mesmo tempo, uma delas espera a outra terminar, ao invés de corromper o dado.
+
+2. "Sobrecarregar o servidor" — escala
+Aqui, sendo honesto: o setup atual não foi pensado pra milhões de usuários — foi pensado pro escopo deste desafio (rodar bem numa máquina, demonstrar as regras de negócio). Pra escala de produção real, o que normalmente se adiciona (e que hoje não temos):
+
+Múltiplas cópias da API rodando (não só um container) atrás de um load balancer, que distribui as requisições entre elas.
+Pool de conexões com o banco — limitar quantas conexões simultâneas cada cópia da API pode abrir, pra não afogar o Postgres.
+Rate limiting — limitar quantas requisições por minuto um mesmo usuário/IP pode fazer.
+Cache (ex: Redis) — evitar bater no banco toda vez pra dados que não mudam com frequência.
+O FastAPI já ajuda um pouco por padrão: ele roda sobre ASGI/async, então um único processo já consegue atender várias requisições "ao mesmo tempo" enquanto espera o banco responder (sem travar esperando uma de cada vez) — mas pra "milhões", isso sozinho não basta, precisa de mais máquinas/processos.
+Vou anotar isso como um item de "melhorias futuras" pro README, já que é uma pergunta legítima de avaliação de julgamento de engenharia.
+
+3. Como garantimos que o usuário tem permissão
+Essa parte já está implementada de verdade, em duas camadas:
+
+a) "Quem é você?" — toda rota protegida passa primeiro pelo get_current_user (hoje o header dev, na Onda 6 vira o JWT). Se não conseguir identificar, nem chega a rodar o código da rota — já devolve 401 antes.
+
+b) "Você pode fazer isso?" — duas formas:
+
+Por ação: algumas rotas exigem um papel específico. Ex: mudar status de ticket vai exigir require_role(Role.SUPPORT) (Onda 4) — se um funcionário tentar, nem entra na função, já bloqueia com 403.
+Por dado: um funcionário só pode ver os próprios tickets — isso é filtrado na consulta ao banco (WHERE created_by_id = <id do usuário>), então nem existe a possibilidade dele "ver sem querer" o ticket de outra pessoa — o banco nunca devolve essas linhas pra ele.
+Na Onda 6, a identidade passa a vir de um JWT assinado — depois que a pessoa loga com email/senha certos, o servidor devolve um token assinado digitalmente. Em cada requisição seguinte, o servidor só precisa conferir a assinatura (rápido, não precisa nem consultar o banco pra isso) pra confiar que aquele token não foi forjado — o que ajuda bastante na escala, porque não depende de guardar "sessões" na memória do servidor.
+
+Quer que eu adicione esse raciocínio de escala como uma seção no README (Onda 7), ou foi só uma pergunta de curiosidade por enquanto?
