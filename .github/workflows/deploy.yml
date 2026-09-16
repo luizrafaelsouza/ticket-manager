@@ -1,12 +1,12 @@
 name: Deploy
 
-# Só roda na branch principal — nunca em PR, evitando publicar algo que
-# ainda não foi revisado. Depende dos outputs do Terraform em infra/terraform
-# (workload_identity_provider e deployer_service_account) já estarem
-# configurados como secrets neste repositório.
+# Disparo manual apenas (Actions > Deploy > Run workflow) — nunca roda sozinho
+# em push, porque depende dos outputs de um "terraform apply" real (secrets
+# GCP_WORKLOAD_IDENTITY_PROVIDER e GCP_DEPLOYER_SERVICE_ACCOUNT configurados
+# neste repositório), que só existiriam contra uma conta GCP de verdade —
+# ver a seção de infraestrutura no README.
 on:
-  push:
-    branches: [main]
+  workflow_dispatch:
 
 permissions:
   id-token: write # necessário pra autenticação via Workload Identity Federation
